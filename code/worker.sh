@@ -397,10 +397,28 @@ APID=$!
 # Give the application at least 10 seconds (some take long to start), then
 # take the screenshot as soon as there is a window, but wait 30 seconds at most
 sleep 10
+# Count only windows that are actually mapped (visible). Java/AWT applications
+# that live in the system tray keep an invisible 10x10 "shared owner" frame
+# that is never mapped but still listed by `xwininfo -tree -root`, so a plain
+# grep for a window would treat that hidden frame as the application's main
+# window and screenshot an empty area instead of falling back to the tray (#4441).
+has_viewable_window() {
+  local id
+  while read -r id _ ; do
+    case "$id" in
+      0x*) ;;
+      *) continue ;;
+    esac
+    if timeout 5 xwininfo -id "$id" 2>/dev/null | grep -q 'Map State: IsViewable' ; then
+      return 0
+    fi
+  done < <(timeout 5 xwininfo -tree -root 2>/dev/null | grep -E '0x.*": \(')
+  return 1
+}
+
 for WAIT in $(seq 1 20) ; do
   kill -0 $APID 2>/dev/null || break
-  WINDOWS=$(timeout 5 xwininfo -tree -root 2>/dev/null || true)
-  grep -qE '0x.*": \(' <<< "$WINDOWS" && break # Not in a pipe: pipefail
+  has_viewable_window && break
   sleep 1
 done
 [ "$WAIT" -gt 1 ] && sleep 2 # A window just appeared; let it finish drawing
@@ -408,7 +426,7 @@ done
 NO_WINDOW=""
 if ! kill -0 $APID 2>/dev/null ; then
   NO_WINDOW="ERROR: The application exited within $((10 + WAIT)) seconds instead of showing a window"
-elif ! grep -qE '0x.*": \(' <<< "$(timeout 5 xwininfo -tree -root 2>/dev/null || true)" ; then
+elif ! has_viewable_window ; then
   NO_WINDOW="ERROR: Could not find a single window on screen :-("
 fi
 
